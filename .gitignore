@@ -1,5 +1,6 @@
 id_rsa
 id_rsa.pub
+/dos_ssh
 ### Go ###
 # Compiled Object files, Static and Dynamic libs (Shared Objects)
 *.o

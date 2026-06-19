@@ -1,10 +1,11 @@
 package main
 
 import (
-	"code.google.com/p/go.crypto/ssh"
 	"log"
 	"net"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 var FrameBufferUpdate chan []byte
@@ -12,21 +13,15 @@ var FrameBufferSubscribers map[string]chan []byte
 
 // Start listening for SSH connections
 func StartSSH() {
-	PEM_KEY := LoadPrivKeyFromFile("./id_rsa")
+	PEM_KEY := LoadOrCreateHostKey("./id_rsa")
 	private, err := ssh.ParsePrivateKey(PEM_KEY)
 	if err != nil {
 		log.Fatal("Key failed to parse.")
 	}
+	log.Println("SSH host key ready")
 
 	SSHConfig := &ssh.ServerConfig{
-		PasswordCallback: func(conn ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) {
-			perms := ssh.Permissions{}
-			return &perms, nil
-		},
-		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-			perms := ssh.Permissions{}
-			return &perms, nil
-		},
+		NoClientAuth: true,
 	}
 
 	SSHConfig.AddHostKey(private)
@@ -40,9 +35,10 @@ func StartSSH() {
 	for {
 		nConn, err := listener.Accept()
 		if err != nil {
-			log.Println("WARNING - Failed to Accept TCP conn. RSN: %s / %s", err.Error(), err)
+			log.Printf("WARNING - Failed to Accept TCP conn. RSN: %s / %s", err.Error(), err)
 			continue
 		}
+		log.Printf("Accepted TCP conn from %s", nConn.RemoteAddr().String())
 		go HandleIncomingSSHConn(nConn, SSHConfig)
 	}
 }
@@ -58,18 +54,24 @@ func TimeoutConnection(Done chan bool, nConn net.Conn) {
 }
 
 func HandleIncomingSSHConn(nConn net.Conn, config *ssh.ServerConfig) {
+	log.Printf("Starting SSH handshake with %s", nConn.RemoteAddr().String())
 	DoneCh := make(chan bool)
 	go TimeoutConnection(DoneCh, nConn)
 	_, chans, reqs, err := ssh.NewServerConn(nConn, config)
-	if err == nil {
-		DoneCh <- true
+	if err != nil {
+		log.Printf("WARNING - SSH handshake failed with %s: %v", nConn.RemoteAddr().String(), err)
+		_ = nConn.Close()
+		return
 	}
+	DoneCh <- true
+	log.Printf("SSH handshake complete with %s", nConn.RemoteAddr().String())
 	// Right now that we are out of annoying people land.
 
 	defer nConn.Close()
 	go HandleSSHrequests(reqs)
 
 	for newChannel := range chans {
+		log.Printf("Incoming SSH channel %s from %s", newChannel.ChannelType(), nConn.RemoteAddr().String())
 		if newChannel.ChannelType() != "session" {
 			newChannel.Reject(ssh.UnknownChannelType, "unknown channel type")
 			log.Printf("WARNING - Rejecting %s Because they asked for a chan type %s that I don't have", nConn.RemoteAddr().String(), newChannel.ChannelType())
@@ -81,6 +83,7 @@ func HandleIncomingSSHConn(nConn net.Conn, config *ssh.ServerConfig) {
 			log.Printf("WARNING - Was unable to Accept channel with %s", nConn.RemoteAddr().String())
 			return
 		}
+		log.Printf("Accepted SSH session channel from %s", nConn.RemoteAddr().String())
 		go HandleSSHrequests(requests)
 		go ServeDOSTerm(channel)
 	}
@@ -89,11 +92,14 @@ func HandleIncomingSSHConn(nConn net.Conn, config *ssh.ServerConfig) {
 
 func HandleSSHrequests(in <-chan *ssh.Request) {
 	for req := range in {
+		log.Printf("SSH request received: type=%s wantReply=%t", req.Type, req.WantReply)
 		if req.WantReply {
 			// Ensure that the other end does not panic that we don't offer terminals
-			if req.Type == "shell" || req.Type == "pty-req" {
+			if req.Type == "shell" || req.Type == "pty-req" || req.Type == "env" {
+				log.Printf("SSH request accepted: type=%s", req.Type)
 				req.Reply(true, nil)
 			} else {
+				log.Printf("SSH request rejected: type=%s", req.Type)
 				req.Reply(false, nil)
 			}
 		}
